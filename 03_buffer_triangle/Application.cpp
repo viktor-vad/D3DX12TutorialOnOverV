@@ -55,6 +55,7 @@ public:
     void createRTVs();
     void createSyncObjects();
     void createPipelineState();
+    void uploadResourceData(ComPtr<ID3D12Resource> resource, const void* data, SIZE_T dataSize, D3D12_RESOURCE_STATES stateAfter = D3D12_RESOURCE_STATE_GENERIC_READ );
     void loadAssets();
 
     void recordCommandList();
@@ -350,14 +351,56 @@ struct Vertex
     DirectX::XMFLOAT4 color;
 };
 
+void Application::ApplicationImpl::uploadResourceData( ComPtr<ID3D12Resource> resource, const void* data, SIZE_T dataSize, D3D12_RESOURCE_STATES stateAfter )
+{
+    ComPtr<ID3D12Resource> uploadBuffer;
+    CD3DX12_HEAP_PROPERTIES heapProps( D3D12_HEAP_TYPE_UPLOAD );
+
+
+    D3D12_RESOURCE_DESC bufferDesc = resource->GetDesc();
+    ThrowIfFailed( device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS( &uploadBuffer ) ) );
+    void* pData;
+    CD3DX12_RANGE readRange( 0, 0 );
+    ThrowIfFailed( uploadBuffer->Map( 0, &readRange, &pData ) );
+    memcpy( pData, data, dataSize );
+    uploadBuffer->Unmap( 0, nullptr );
+    
+    ThrowIfFailed( commandAllocators[frameIndex]->Reset());
+
+    ThrowIfFailed( commandList->Reset( commandAllocators[frameIndex].Get(), nullptr ) );
+    {
+        auto barrier = CD3DX12_RESOURCE_BARRIER::Transition( resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST );
+        commandList->ResourceBarrier( 1, &barrier );
+    }
+    commandList->CopyBufferRegion( resource.Get(), 0, uploadBuffer.Get(), 0, dataSize );
+    {
+        auto barrier = CD3DX12_RESOURCE_BARRIER::Transition( resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, stateAfter );
+        commandList->ResourceBarrier( 1, &barrier );
+    }
+
+    ThrowIfFailed( commandList->Close() );
+
+    commandQueue->ExecuteCommandLists( 1, CommandListCast( commandList.GetAddressOf() ) );
+
+    waitFrame2Finish();
+
+    uploadBuffer.Reset();
+}
+
 void Application::ApplicationImpl::loadAssets()
 {
     std::array<Vertex, 4> triangleVertices =
     {
-        Vertex{ {  0.25f, -0.25f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-        Vertex{ { -0.25f, -0.25f, 0.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-        Vertex{ { -0.25f,  0.25f, 0.0f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
-        Vertex{ {  0.25f,  0.25f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }
+        Vertex{ {  1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        Vertex{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+        Vertex{ { -1.0f,  1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+        Vertex{ {  1.0f,  1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }
     };
 
     std::array<UINT16, 6> triangleIndices =
@@ -366,50 +409,44 @@ void Application::ApplicationImpl::loadAssets()
         0, 2, 3
     };
 
-    CD3DX12_HEAP_PROPERTIES heapProps( D3D12_HEAP_TYPE_UPLOAD );
+    CD3DX12_HEAP_PROPERTIES heapProps( D3D12_HEAP_TYPE_DEFAULT );
     CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer( sizeof( Vertex ) * triangleVertices.size() );
 
     ThrowIfFailed( device->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
         &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
+        D3D12_RESOURCE_STATE_COMMON,
         nullptr,
         IID_PPV_ARGS( &vertexBuffer ) ) );
 
     vertexBuffer->SetName( L"Vertex Buffer" );
 
-    void* pVertexDataBegin;
-    CD3DX12_RANGE readRange( 0, 0 );
-    ThrowIfFailed( vertexBuffer->Map( 0, &readRange, &pVertexDataBegin ) );
-    memcpy( pVertexDataBegin, triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size() );
-    vertexBuffer->Unmap( 0, nullptr );
+    uploadResourceData( vertexBuffer, triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER );
 
     vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
     vertexBufferView.SizeInBytes = static_cast<UINT>( sizeof( Vertex ) * triangleVertices.size() );
     vertexBufferView.StrideInBytes = sizeof( Vertex );
 
-    CD3DX12_HEAP_PROPERTIES heapProperties( D3D12_HEAP_TYPE_UPLOAD );
+    CD3DX12_HEAP_PROPERTIES heapProperties( D3D12_HEAP_TYPE_DEFAULT );
     CD3DX12_RESOURCE_DESC resourceDesc( CD3DX12_RESOURCE_DESC::Buffer( sizeof( UINT16 ) * triangleIndices.size() ) );
 
     ThrowIfFailed( device->CreateCommittedResource(
         &heapProperties,
         D3D12_HEAP_FLAG_NONE,
         &resourceDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
+        D3D12_RESOURCE_STATE_COMMON,
         nullptr,
         IID_PPV_ARGS( &indexBuffer ) ) );
 
     indexBuffer->SetName( L"Index Buffer" );
+    
+    uploadResourceData( indexBuffer, triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size(), D3D12_RESOURCE_STATE_INDEX_BUFFER );
 
-    void* pIndexDataBegin;
-    ThrowIfFailed( indexBuffer->Map( 0, &readRange, &pIndexDataBegin ) );
-    memcpy( pIndexDataBegin, triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size() );
-    indexBuffer->Unmap( 0, nullptr );
 
     indexBufferView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
-    indexBufferView.SizeInBytes = static_cast<UINT>( sizeof( UINT16 ) * triangleIndices.size() );
-    indexBufferView.Format = DXGI_FORMAT_R16_UINT;
+    indexBufferView.SizeInBytes    = static_cast<UINT>( sizeof( UINT16 ) * triangleIndices.size() );
+    indexBufferView.Format         = DXGI_FORMAT_R16_UINT;
 }
 
 void Application::ApplicationImpl::initDX12(HWND hwnd)

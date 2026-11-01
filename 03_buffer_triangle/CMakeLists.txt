@@ -7,6 +7,8 @@ target_link_libraries(${TARGET_NAME} PRIVATE SDL3::SDL3)
 target_link_libraries(${TARGET_NAME} PRIVATE dxguid dxgi Microsoft::DirectX12-Layers Microsoft::DirectX12-Core Microsoft::DirectX-Headers Microsoft::DirectX-Guids Microsoft::DirectX12-Agility)
 target_link_libraries(${TARGET_NAME} PRIVATE Microsoft::WinPixEventRuntime)
 
+target_compile_definitions(${TARGET_NAME} PRIVATE NOMINMAX WIN32_MEAN_AND_LEAN)
+
 compile_shader_file(
     TARGET ${TARGET_NAME} 
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/shaders/buffer_tri.slang

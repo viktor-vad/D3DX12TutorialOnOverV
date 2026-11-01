@@ -72,4 +72,8 @@ add_subdirectory(00_base_code)
 add_subdirectory(01_device_creation)
 add_subdirectory(02_no_buffer_triangle)
 add_subdirectory(03_buffer_triangle)
+
+add_compile_definitions(
+	WIN32_LEAN_AND_MEAN NOMINMAX
+)
 # TODO: Add tests and install targets if needed.
