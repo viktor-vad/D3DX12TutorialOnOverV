@@ -3,6 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <array>
+#include <bit>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -63,7 +64,7 @@ public:
     void createSyncObjects();
     void createCBVSRVUAVHeap();
     void createPipelineState();
-    void uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA subResourceData, UINT firstSubresource = 0, UINT numSubresources = 1, D3D12_RESOURCE_STATES stateAfter = D3D12_RESOURCE_STATE_GENERIC_READ );
+    void uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA* subResourceData, UINT firstSubresource = 0, UINT numSubresources = 1, D3D12_RESOURCE_STATES stateAfter = D3D12_RESOURCE_STATE_GENERIC_READ );
     void loadAssets();
 
     void recordCommandList();
@@ -416,7 +417,7 @@ struct Vertex
     XMFLOAT2 texCoord;
 };
 
-void Application::ApplicationImpl::uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA subResourceData, UINT firstSubresource, UINT numSubresources, D3D12_RESOURCE_STATES stateAfter)
+void Application::ApplicationImpl::uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA* subResourceData, UINT firstSubresource, UINT numSubresources, D3D12_RESOURCE_STATES stateAfter)
 {
     ComPtr<ID3D12Resource> uploadBuffer;
     CD3DX12_HEAP_PROPERTIES heapProps( D3D12_HEAP_TYPE_UPLOAD );
@@ -441,7 +442,7 @@ void Application::ApplicationImpl::uploadResourceData(ComPtr<ID3D12Resource> res
         commandList->ResourceBarrier( 1, &barrier );
     }
 
-    UpdateSubresources( commandList.Get(), resource.Get(), uploadBuffer.Get(), 0, firstSubresource, numSubresources, &subResourceData );
+    UpdateSubresources( commandList.Get(), resource.Get(), uploadBuffer.Get(), 0, firstSubresource, numSubresources, subResourceData );
     
     {
         auto barrier = CD3DX12_RESOURCE_BARRIER::Transition( resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, stateAfter );
@@ -488,9 +489,9 @@ void Application::ApplicationImpl::loadAssets()
 
     UINT64 vertBuffSize = GetRequiredIntermediateSize( vertexBuffer.Get(), 0, 1 );
 
-    
+    auto vertSubresourceData = BufferSubResourceData( triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size() );
     uploadResourceData( vertexBuffer, 
-        BufferSubResourceData( triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size() ), 0, 1, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER );
+        &vertSubresourceData, 0, 1, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER );
 
     vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
     vertexBufferView.SizeInBytes = static_cast<UINT>( sizeof( Vertex ) * triangleVertices.size() );
@@ -509,8 +510,9 @@ void Application::ApplicationImpl::loadAssets()
 
     indexBuffer->SetName( L"Index Buffer" );
     
+    auto indSubresourceData = BufferSubResourceData( triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size() );
     uploadResourceData( indexBuffer, 
-        BufferSubResourceData( triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size() ), 0, 1, D3D12_RESOURCE_STATE_INDEX_BUFFER );
+        &indSubresourceData, 0, 1, D3D12_RESOURCE_STATE_INDEX_BUFFER );
 
 
     indexBufferView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
@@ -541,15 +543,135 @@ void Application::ApplicationImpl::loadAssets()
         ThrowIfFailed( AspectRatioBufferCbv->Map( 0, &readRange, reinterpret_cast<void**>( &pAspectRatioBufferData ) ) );
     }
     {
-        int x,y,n;
-        XMUBYTE4 *data = reinterpret_cast<XMUBYTE4 *>(stbi_load((runtime_path / "Assets" / "abstract.png").string().c_str(), &x, &y, &n, 4));
-
-        if ( !data )
+        struct ImageRGBA
         {
-            throw std::runtime_error( "Failed to load texture image" );
+            typedef XMUBYTE4 TexelRGBA;
+
+            static_assert( sizeof( TexelRGBA ) == sizeof( std::uint32_t ) );
+
+
+            std::vector<TexelRGBA> texelData;
+            UINT width		   = 0;
+            UINT height		   = 0;
+
+            bool Allocate( unsigned int _width, unsigned int _height )
+            {
+                width = _width;
+                height = _height;
+
+                texelData.resize( width * height );
+
+                return !texelData.empty();
+            }
+
+            bool Assign( const std::uint32_t* _TexelData, unsigned int _width, unsigned int _height )
+            {
+                width = _width;
+                height = _height;
+
+                const TexelRGBA* _data = reinterpret_cast<const TexelRGBA*>( _TexelData );
+
+                texelData.assign( _data, _data + width * height );
+
+                return !texelData.empty();
+            }
+
+            TexelRGBA GetTexel( unsigned int x, unsigned int y ) const
+            {
+                return texelData[y * width + x];
+            }
+
+            void SetTexel( unsigned int x, unsigned int y,const TexelRGBA& texel )
+            {
+                texelData[y * width + x] = texel;
+            }
+
+            const TexelRGBA* data() const
+            {
+                return texelData.data();
+            }
+
+        }; 
+
+        ImageRGBA Image;
+        {
+            int x, y, n;
+            XMUBYTE4* data = reinterpret_cast<XMUBYTE4*>( stbi_load( ( runtime_path / "Assets" / "abstract.png" ).string().c_str(), &x, &y, &n, 4 ) );
+
+            if ( !data )
+            {
+                throw std::runtime_error( "Failed to load texture image" );
+            }
+
+            Image = {
+                .texelData = std::vector<XMUBYTE4>( data, data + x * y ),
+                .width = static_cast<UINT>( x ),
+                .height = static_cast<UINT>( y )
+            };
+            stbi_image_free(data);
         }
 
-        CD3DX12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D( DXGI_FORMAT_R8G8B8A8_UNORM, x, y, 1, 1 );
+        UINT nMips = std::bit_width<UINT>(const_cast<UINT&>(std::max(Image.width, Image.height)));
+
+        ImageRGBA ImageFiltered;
+        ImageRGBA ImageL;
+
+        std::vector<ImageRGBA> mipmaps;
+
+        for ( unsigned int Level = 0; Level < nMips; Level++ )
+        {
+            static constexpr XMUBYTE4 PIXELFILTER[ 3 ] = { XMUBYTE4(0ui8,1ui8,1ui8,0ui8), XMUBYTE4(1ui8,0ui8,1ui8,0ui8), XMUBYTE4(1ui8,1ui8,0ui8,0ui8) };
+            ImageFiltered.Allocate( Image.width, Image.height );
+            for ( unsigned int j = 0; j < Image.height; ++j )
+                for ( unsigned int i = 0; i < Image.width; ++i )
+                {
+                    XMUBYTE4 pixel = Image.GetTexel( i, j );
+                    
+                    {
+                        XMUBYTE4 filter = PIXELFILTER[ Level % 3 ];
+                        pixel = XMUBYTE4( uint8_t( pixel.x >> filter.x ),
+                                          uint8_t( pixel.y >> filter.y ),
+                                          uint8_t( pixel.z >> filter.z ),
+                                          uint8_t( pixel.w >> filter.w ) );
+                    }
+                    ImageFiltered.SetTexel( i, j, pixel );
+                }
+
+            mipmaps.emplace_back( std::move( ImageFiltered ) );
+
+            ImageL.Allocate( Image.width / 2, Image.height / 2 );
+            for ( unsigned int j = 0; j < ImageL.height; ++j )
+                for ( unsigned int i = 0; i < ImageL.width; ++i )
+                {
+                    XMUBYTE4 tmp = Image.GetTexel( 2 * i, 2 * j );
+                    XMUINT4 pixel = XMUINT4(tmp.x, tmp.y, tmp.z, tmp.w);
+                    pixel.x += Image.GetTexel( 2 * i + 1, 2 * j ).x;
+                    pixel.y += Image.GetTexel( 2 * i + 1, 2 * j ).y;
+                    pixel.z += Image.GetTexel( 2 * i + 1, 2 * j ).z;
+                    pixel.w += Image.GetTexel( 2 * i + 1, 2 * j ).w;
+
+                    pixel.x += Image.GetTexel( 2 * i, 2 * j + 1 ).x;
+                    pixel.y += Image.GetTexel( 2 * i, 2 * j + 1 ).y;
+                    pixel.z += Image.GetTexel( 2 * i, 2 * j + 1 ).z;
+                    pixel.w += Image.GetTexel( 2 * i, 2 * j + 1 ).w;
+
+                    pixel.x += Image.GetTexel( 2 * i + 1, 2 * j + 1 ).x;
+                    pixel.y += Image.GetTexel( 2 * i + 1, 2 * j + 1 ).y;
+                    pixel.z += Image.GetTexel( 2 * i + 1, 2 * j + 1 ).z;
+                    pixel.w += Image.GetTexel( 2 * i + 1, 2 * j + 1 ).w;
+
+                    pixel.x /= 4;
+                    pixel.y /= 4;
+                    pixel.z /= 4;
+                    pixel.w /= 4;
+
+                    ImageL.SetTexel( i, j, XMUBYTE4(uint8_t(pixel.x), uint8_t(pixel.y), uint8_t(pixel.z), uint8_t(pixel.w)) );
+                }
+
+            Image = std::move(ImageL);
+        }
+
+        CD3DX12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D( DXGI_FORMAT_R8G8B8A8_UNORM, mipmaps[0].width, mipmaps[0].height, 1, nMips);
 
         CD3DX12_HEAP_PROPERTIES texHeapProps( D3D12_HEAP_TYPE_DEFAULT );
         ThrowIfFailed( device->CreateCommittedResource(
@@ -562,26 +684,31 @@ void Application::ApplicationImpl::loadAssets()
 
         texture->SetName( L"Texture" );
 
-        D3D12_SUBRESOURCE_DATA subResourceData = {};
-        subResourceData.pData = data;
-        subResourceData.RowPitch = x * sizeof(XMUBYTE4);
-        subResourceData.SlicePitch = subResourceData.RowPitch * y;
+        std::vector<D3D12_SUBRESOURCE_DATA> subResourceDataArray;
+        for ( const auto& mipmap : mipmaps )
+        {
+            D3D12_SUBRESOURCE_DATA subResourceData = {};
+            subResourceData.pData = mipmap.data();
+            subResourceData.RowPitch = mipmap.width * sizeof( XMUBYTE4 );
+            subResourceData.SlicePitch = subResourceData.RowPitch * mipmap.height;
+            subResourceDataArray.push_back( subResourceData );
+        }   
 
-        uploadResourceData( texture, subResourceData, 0, 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+        uploadResourceData( texture, subResourceDataArray.data(), 0, UINT(subResourceDataArray.size()), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MostDetailedMip = 0;
-        srvDesc.Texture2D.MipLevels = 1;
+        srvDesc.Texture2D.MipLevels = nMips;
         srvDesc.Texture2D.PlaneSlice = 0;
         srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
 
         device->CreateShaderResourceView( texture.Get(), &srvDesc, 
             CD3DX12_CPU_DESCRIPTOR_HANDLE( cbvSrvUavDescriptorHeap->GetCPUDescriptorHandleForHeapStart() ).Offset( 1, cbvSrvUavDescriptorSize ) );
 
-        stbi_image_free(data);
+
     }
 
 }
