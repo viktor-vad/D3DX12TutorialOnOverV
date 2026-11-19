@@ -36,6 +36,7 @@ function (compile_shader_file)
 		PRIVATE
         "${SHADER_FILE}"
 	)
+	source_group("${SHADER_TARGET}\\Shaders" FILES "${SHADER_FILE}")
 
 	cmake_path(GET SHADER_FILE STEM SHADER_BASEFILENAME)
 	

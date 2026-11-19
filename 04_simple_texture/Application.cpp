@@ -18,6 +18,7 @@
 #include <directx/d3dx12.h>
 
 #include <DirectXMath.h>
+#include <DirectXPackedVector.h>
 
 // IDXGIFactory7
 // IDXGIAdapter4
@@ -30,12 +31,17 @@
 //PixEvent
 #include <pix3.h>
 
+// stb image
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619;}
 
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
+using namespace DirectX::PackedVector;
 
 class Application::ApplicationImpl
 {
@@ -55,9 +61,9 @@ public:
     void createRTVHeap();
     void createRTVs();
     void createSyncObjects();
-    void createCBVHeap();
+    void createCBVSRVUAVHeap();
     void createPipelineState();
-    void uploadResourceData(ComPtr<ID3D12Resource> resource, const void* data, SIZE_T dataSize, D3D12_RESOURCE_STATES stateAfter = D3D12_RESOURCE_STATE_GENERIC_READ );
+    void uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA subResourceData, UINT firstSubresource = 0, UINT numSubresources = 1, D3D12_RESOURCE_STATES stateAfter = D3D12_RESOURCE_STATE_GENERIC_READ );
     void loadAssets();
 
     void recordCommandList();
@@ -99,9 +105,13 @@ public:
     ComPtr<ID3D12Resource> indexBuffer;
     D3D12_INDEX_BUFFER_VIEW indexBufferView;
 
-    ComPtr<ID3D12DescriptorHeap> cbvDescriptorHeap;
+    ComPtr<ID3D12DescriptorHeap> cbvSrvUavDescriptorHeap;
+    UINT cbvSrvUavDescriptorSize = 0;
 
     ComPtr<ID3D12Resource> AspectRatioBufferCbv;
+
+    ComPtr<ID3D12DescriptorHeap> srvDescriptorHeap;
+    ComPtr<ID3D12Resource> texture;
     
 
     struct alignas( D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT ) AspectRatioBuffer
@@ -156,6 +166,16 @@ public:
 
         return S_OK;
     }
+
+    static inline D3D12_SUBRESOURCE_DATA BufferSubResourceData( const void* data, SIZE_T dataSize )
+    {
+        D3D12_SUBRESOURCE_DATA subresourceData = {};
+        subresourceData.pData = data;
+        subresourceData.RowPitch = dataSize;
+        subresourceData.SlicePitch = subresourceData.RowPitch;
+        return subresourceData;
+    }
+        
 
     ComPtr<IDXGIAdapter4> GetAdapter();
     std::filesystem::path runtime_path;
@@ -314,16 +334,16 @@ void Application::ApplicationImpl::createSyncObjects()
     }
 }
 
-void Application::ApplicationImpl::createCBVHeap()
+void Application::ApplicationImpl::createCBVSRVUAVHeap()
 {
-    D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc = {};
-    cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    cbvHeapDesc.NumDescriptors = 1;
-    cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC cbvSrvUavHeapDesc = {};
+    cbvSrvUavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    cbvSrvUavHeapDesc.NumDescriptors = 2;
+    cbvSrvUavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
-    ThrowIfFailed(device->CreateDescriptorHeap(&cbvHeapDesc, IID_PPV_ARGS(&cbvDescriptorHeap)));
-    cbvDescriptorHeap->SetName( L"CBV Descriptor Heap" );
-    //cbvDescriptorSize = device->GetDescriptorHandleIncrementSize( D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+    ThrowIfFailed(device->CreateDescriptorHeap(&cbvSrvUavHeapDesc, IID_PPV_ARGS(&cbvSrvUavDescriptorHeap)));
+    cbvSrvUavDescriptorHeap->SetName( L"CBV, SRV and UAV Descriptor Heap" );
+    cbvSrvUavDescriptorSize = device->GetDescriptorHandleIncrementSize( D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
 }
 
 
@@ -331,15 +351,26 @@ void Application::ApplicationImpl::createPipelineState()
 {
     // root signature
 
-    CD3DX12_DESCRIPTOR_RANGE1 ranges[ 1 ];
-    ranges[0].Init( D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE );
+    CD3DX12_STATIC_SAMPLER_DESC samplerDesc( 0, D3D12_FILTER_MIN_MAG_MIP_LINEAR );
 
-    CD3DX12_ROOT_PARAMETER1 rootParameters[ 1 ];
+    CD3DX12_DESCRIPTOR_RANGE1 ranges[ 2 ];
+    ranges[0].Init( D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE );
+    ranges[1].Init( D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE );
+
+    CD3DX12_ROOT_PARAMETER1 rootParameters[ 2 ];
     rootParameters[ 0 ].InitAsDescriptorTable( 1, &ranges[ 0 ], D3D12_SHADER_VISIBILITY_VERTEX );
+    rootParameters[ 1 ].InitAsDescriptorTable( 1, &ranges[ 1 ], D3D12_SHADER_VISIBILITY_PIXEL );
 
     CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC  versionedRootSignatureDesc;
-    versionedRootSignatureDesc.Init_1_1(1, rootParameters, 0, nullptr, 
-                                    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT // The app is opting in to using the Input Assembler 
+    versionedRootSignatureDesc.Init_1_1(2, rootParameters, 1, &samplerDesc, 
+                                     D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT // The app is opting in to using the Input Assembler 
+                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS
+                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS    
+                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS
+                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS
+                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS
+                                   
+
     );
 
     ComPtr<ID3DBlob> signature;
@@ -385,13 +416,15 @@ struct Vertex
     XMFLOAT2 texCoord;
 };
 
-void Application::ApplicationImpl::uploadResourceData( ComPtr<ID3D12Resource> resource, const void* data, SIZE_T dataSize, D3D12_RESOURCE_STATES stateAfter )
+void Application::ApplicationImpl::uploadResourceData(ComPtr<ID3D12Resource> resource, D3D12_SUBRESOURCE_DATA subResourceData, UINT firstSubresource, UINT numSubresources, D3D12_RESOURCE_STATES stateAfter)
 {
     ComPtr<ID3D12Resource> uploadBuffer;
     CD3DX12_HEAP_PROPERTIES heapProps( D3D12_HEAP_TYPE_UPLOAD );
 
+    UINT64 resourceDescSize = GetRequiredIntermediateSize( resource.Get(), firstSubresource, numSubresources);
 
-    D3D12_RESOURCE_DESC bufferDesc = resource->GetDesc();
+    D3D12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer( resourceDescSize );
+
     ThrowIfFailed( device->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
@@ -399,12 +432,7 @@ void Application::ApplicationImpl::uploadResourceData( ComPtr<ID3D12Resource> re
         D3D12_RESOURCE_STATE_GENERIC_READ,
         nullptr,
         IID_PPV_ARGS( &uploadBuffer ) ) );
-    void* pData;
-    CD3DX12_RANGE readRange( 0, 0 );
-    ThrowIfFailed( uploadBuffer->Map( 0, &readRange, &pData ) );
-    memcpy( pData, data, dataSize );
-    uploadBuffer->Unmap( 0, nullptr );
-    
+
     ThrowIfFailed( commandAllocators[frameIndex]->Reset());
 
     ThrowIfFailed( commandList->Reset( commandAllocators[frameIndex].Get(), nullptr ) );
@@ -412,7 +440,9 @@ void Application::ApplicationImpl::uploadResourceData( ComPtr<ID3D12Resource> re
         auto barrier = CD3DX12_RESOURCE_BARRIER::Transition( resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST );
         commandList->ResourceBarrier( 1, &barrier );
     }
-    commandList->CopyBufferRegion( resource.Get(), 0, uploadBuffer.Get(), 0, dataSize );
+
+    UpdateSubresources( commandList.Get(), resource.Get(), uploadBuffer.Get(), 0, firstSubresource, numSubresources, &subResourceData );
+    
     {
         auto barrier = CD3DX12_RESOURCE_BARRIER::Transition( resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, stateAfter );
         commandList->ResourceBarrier( 1, &barrier );
@@ -456,7 +486,11 @@ void Application::ApplicationImpl::loadAssets()
 
     vertexBuffer->SetName( L"Vertex Buffer" );
 
-    uploadResourceData( vertexBuffer, triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER );
+    UINT64 vertBuffSize = GetRequiredIntermediateSize( vertexBuffer.Get(), 0, 1 );
+
+    
+    uploadResourceData( vertexBuffer, 
+        BufferSubResourceData( triangleVertices.data(), sizeof( Vertex ) * triangleVertices.size() ), 0, 1, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER );
 
     vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
     vertexBufferView.SizeInBytes = static_cast<UINT>( sizeof( Vertex ) * triangleVertices.size() );
@@ -475,7 +509,8 @@ void Application::ApplicationImpl::loadAssets()
 
     indexBuffer->SetName( L"Index Buffer" );
     
-    uploadResourceData( indexBuffer, triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size(), D3D12_RESOURCE_STATE_INDEX_BUFFER );
+    uploadResourceData( indexBuffer, 
+        BufferSubResourceData( triangleIndices.data(), sizeof( UINT16 ) * triangleIndices.size() ), 0, 1, D3D12_RESOURCE_STATE_INDEX_BUFFER );
 
 
     indexBufferView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
@@ -500,11 +535,55 @@ void Application::ApplicationImpl::loadAssets()
         cbvDesc.BufferLocation = AspectRatioBufferCbv->GetGPUVirtualAddress();
         cbvDesc.SizeInBytes = sizeof( AspectRatioBuffer );
 
-        device->CreateConstantBufferView( &cbvDesc, cbvDescriptorHeap->GetCPUDescriptorHandleForHeapStart() );
+        device->CreateConstantBufferView( &cbvDesc, cbvSrvUavDescriptorHeap->GetCPUDescriptorHandleForHeapStart() );
 
         CD3DX12_RANGE readRange( 0, 0 );
         ThrowIfFailed( AspectRatioBufferCbv->Map( 0, &readRange, reinterpret_cast<void**>( &pAspectRatioBufferData ) ) );
     }
+    {
+        int x,y,n;
+        XMUBYTE4 *data = reinterpret_cast<XMUBYTE4 *>(stbi_load((runtime_path / "Assets" / "abstract.png").string().c_str(), &x, &y, &n, 4));
+
+        if ( !data )
+        {
+            throw std::runtime_error( "Failed to load texture image" );
+        }
+
+        CD3DX12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D( DXGI_FORMAT_R8G8B8A8_UNORM, x, y, 1, 1 );
+
+        CD3DX12_HEAP_PROPERTIES texHeapProps( D3D12_HEAP_TYPE_DEFAULT );
+        ThrowIfFailed( device->CreateCommittedResource(
+            &texHeapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &textureDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS( &texture ) ) );
+
+        texture->SetName( L"Texture" );
+
+        D3D12_SUBRESOURCE_DATA subResourceData = {};
+        subResourceData.pData = data;
+        subResourceData.RowPitch = x * sizeof(XMUBYTE4);
+        subResourceData.SlicePitch = subResourceData.RowPitch * y;
+
+        uploadResourceData( texture, subResourceData, 0, 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+        srvDesc.Texture2D.PlaneSlice = 0;
+        srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+        device->CreateShaderResourceView( texture.Get(), &srvDesc, 
+            CD3DX12_CPU_DESCRIPTOR_HANDLE( cbvSrvUavDescriptorHeap->GetCPUDescriptorHandleForHeapStart() ).Offset( 1, cbvSrvUavDescriptorSize ) );
+
+        stbi_image_free(data);
+    }
+
 }
 
 void Application::ApplicationImpl::initDX12(HWND hwnd)
@@ -517,7 +596,7 @@ void Application::ApplicationImpl::initDX12(HWND hwnd)
     createRTVHeap();
     createRTVs();
     createSyncObjects();
-    createCBVHeap();
+    createCBVSRVUAVHeap();
     loadAssets();
     createPipelineState();
 }
@@ -609,8 +688,11 @@ void Application::ApplicationImpl::recordCommandList()
     //PIXScopedEvent( commandList.Get(), PIX_COLOR( 255, 255, 0 ), L"Record command list" );
     
     commandList->SetGraphicsRootSignature( rootSignature.Get() );
-    commandList->SetDescriptorHeaps( 1, cbvDescriptorHeap.GetAddressOf() );
-    commandList->SetGraphicsRootDescriptorTable( 0, cbvDescriptorHeap->GetGPUDescriptorHandleForHeapStart() );
+    commandList->SetDescriptorHeaps( 1, cbvSrvUavDescriptorHeap.GetAddressOf() );
+    CD3DX12_GPU_DESCRIPTOR_HANDLE cbvSrvUavDescriptorHandle( cbvSrvUavDescriptorHeap->GetGPUDescriptorHandleForHeapStart() );
+    commandList->SetGraphicsRootDescriptorTable( 0, cbvSrvUavDescriptorHandle );
+    cbvSrvUavDescriptorHandle.Offset( 1, cbvSrvUavDescriptorSize );
+    commandList->SetGraphicsRootDescriptorTable( 1, cbvSrvUavDescriptorHandle );
 
     commandList->RSSetViewports( 1, &viewport );
     commandList->RSSetScissorRects( 1, &scissorRect );
